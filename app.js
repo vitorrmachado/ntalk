@@ -9,16 +9,21 @@ const expressSession = require('express-session');
 const methodOverride = require('method-override');
 const config = require('./config');
 const error = require('./middlewares/errors');
-const cookie=require('cookie');
+
+const redisAdapter = require('socket.io-redis');
+const RedisStore = require('connect-redis')(expressSession)
+
+const cookie = require('cookie');
 const app = express();
 const server = http.Server(app);
 const io = socketIO(server);
-const store = new expressSession.MemoryStore();
+//const store = new expressSession.MemoryStore();
+const store = new RedisStore({ prefix: config.sessionKey });
 
 const mongoose = require('mongoose');
 const bluebird = require('bluebird');
 mongoose.Promise = bluebird;
-global.db	=	mongoose.connect('mongodb://localhost:27017/ntalk');
+global.db = mongoose.connect('mongodb://localhost:27017/ntalk');
 
 app.set('views', path.join(__dirname, 'views'));
 app.set('view engine', 'ejs');
@@ -35,46 +40,56 @@ app.use(bodyParser.urlencoded());
 app.use(methodOverride('_method'));
 app.use(express.static(path.join(__dirname, 'public')));
 
+io.adapter(redisAdapter());
+
 io.use((socket, next) => {
   const cookieData = socket.request.headers.cookie;
   const cookieObj = cookie.parse(cookieData);
   const sessionHash = cookieObj[config.sessionKey] || '';
   const sessionID = sessionHash.split('.')[0].slice(2);
-  store.all((err, sessions) => {
+  /*store.all((err, sessions) => {
       const currentSession = sessions[sessionID];
       if (err || !currentSession) {
           return next(new Error('Acesso negado!'));
       }
       socket.handshake.session = currentSession;
       return next();
+  });*/
+  store.get(sessionID, (err, currentSession) => {
+    if (err) {
+      return next(new Error('Acesso negado!'));
+    }
+    socket.handshake.session = currentSession;
+    return next();
   });
+return true;
 });
 
-const	onlines	=	{};
-const	redis	=	require('redis').createClient();
+const onlines = {};
+const redis = require('redis').createClient();
 
 io.on('connection', (client) => {
   const { session } = client.handshake;
   const { usuario } = session;
-  /*onlines[usuario.email]	=	usuario.email;
-  for	(let	email	in	onlines)	{
-    client.emit('notify-onlines',	email);
-    client.broadcast.emit('notify-onlines',	email);
+  /*onlines[usuario.email] = usuario.email;
+  for (let email in onlines) {
+    client.emit('notify-onlines', email);
+    client.broadcast.emit('notify-onlines', email);
   }*/
-  redis.sadd('onlines',	usuario.email,	()	=>	{
-    redis.smembers('onlines',	(err,	emails)	=>	{
-        emails.forEach((email)	=>	{
-            client.emit('notify-onlines',	email);
-            client.broadcast.emit('notify-onlines',	email);
+  redis.sadd('onlines', usuario.email, () => {
+    redis.smembers('onlines', (err, emails) => {
+        emails.forEach((email) => {
+            client.emit('notify-onlines', email);
+            client.broadcast.emit('notify-onlines', email);
         });
     });
   });
   client.on('send-server',(hashSala,msg)=>{
     const novaMensagem = { email: usuario.email , sala: hashSala };
     const resposta = `<b>${usuario.nome}:</b>${msg.msg}<br>`;
-    redis.lpush(hashSala,	resposta);
-		client.broadcast.emit('new-message',	novaMensagem);
-		io.to(hashSala).emit('send-client',	resposta);
+    redis.lpush(hashSala, resposta);
+  client.broadcast.emit('new-message', novaMensagem);
+  io.to(hashSala).emit('send-client', resposta);
     /*session.sala = hashDaSala;
     client.broadcast.emit('new-message', novaMensagem);
     io.to(hashDaSala).emit('send-client', resposta);*/
@@ -83,35 +98,35 @@ io.on('connection', (client) => {
     console.log(hashSala);
     session.sala = hashSala;
     client.join(hashSala);
-    const	resposta	=	`<b>${usuario.nome}:</b>	entrou.<br>`;
-    redis.lpush(hashSala,	resposta,	()	=>	{
-      redis.lrange(hashSala,	0,	-1,	(err,	msgs)	=>	{
-          msgs.forEach((msg)	=>	{
-            io.to(hashSala).emit('send-client',	msg);
+    const resposta = `<b>${usuario.nome}:</b> entrou.<br>`;
+    redis.lpush(hashSala, resposta, () => {
+      redis.lrange(hashSala, 0, -1, (err, msgs) => {
+          msgs.forEach((msg) => {
+            io.to(hashSala).emit('send-client', msg);
           });
       });
     });
   });
 
   client.on('disconnect', () => {
-    const	{ sala }	=	session;
-    const	resposta	=	`<b>${usuario.nome}:</b>	disconnected.<br>`;
-    //delete	onlines[usuario.email];
-    redis.srem('onlines',	usuario.email);
-    redis.lpush(sala,	resposta,	()	=>	{
-      session.sala	=	null;
+    const { sala } = session;
+    const resposta = `<b>${usuario.nome}:</b> disconnected.<br>`;
+    //delete onlines[usuario.email];
+    redis.srem('onlines', usuario.email);
+    redis.lpush(sala, resposta, () => {
+      session.sala = null;
       client.leave(sala);
-      client.broadcast.emit('notify-offlines',	usuario.email);
-      io.to(sala).emit('send-client',	resposta);
+      client.broadcast.emit('notify-offlines', usuario.email);
+      io.to(sala).emit('send-client', resposta);
     });
-    /*session.sala	=	null;
+    /*session.sala = null;
     client.leave(sala);
-    client.broadcast.emit('notify-offlines',	usuario.email);
-    io.to(sala).emit('send-client',	resposta);*/
+    client.broadcast.emit('notify-offlines', usuario.email);
+    io.to(sala).emit('send-client', resposta);*/
   });
 });
 
-consign({}).include('models')
+consign({verbose: false}).include('models')
            .then('controllers')
            .then('routes')
            .into(app);
